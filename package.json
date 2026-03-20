@@ -1,0 +1,15 @@
+{
+  "name": "deni-ai-desktop-updater",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "check": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.12.8"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@typescript/native-preview": "^7.0.0-dev.20260319.1"
+  }
+}
