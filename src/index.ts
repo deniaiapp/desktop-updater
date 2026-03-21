@@ -53,7 +53,15 @@ const PLATFORM_DEFINITIONS: PlatformDefinition[] = [
     matchers: [/darwin_(aarch64|arm64)\.app\.tar\.gz$/i],
   },
   {
+    target: "darwin-aarch64-app",
+    matchers: [/darwin_(aarch64|arm64)\.app\.tar\.gz$/i],
+  },
+  {
     target: "darwin-x86_64",
+    matchers: [/darwin_(x64|x86_64)\.app\.tar\.gz$/i],
+  },
+  {
+    target: "darwin-x86_64-app",
     matchers: [/darwin_(x64|x86_64)\.app\.tar\.gz$/i],
   },
   {
@@ -169,6 +177,10 @@ function findSignatureAsset(
   return assets.find((candidate) => candidate.name === `${assetName}.sig`);
 }
 
+function findAsset(assets: ReleaseAsset[], assetName: string): ReleaseAsset | undefined {
+  return assets.find((candidate) => candidate.name === assetName);
+}
+
 async function fetchSignature(asset: ReleaseAsset): Promise<string> {
   const response = await fetch(asset.browser_download_url, {
     headers: githubHeaders(),
@@ -181,9 +193,48 @@ async function fetchSignature(asset: ReleaseAsset): Promise<string> {
   return (await response.text()).trim();
 }
 
+function isUpdaterManifest(value: unknown): value is UpdaterManifest {
+  if (!value || typeof value !== "object") return false;
+
+  const candidate = value as Partial<UpdaterManifest>;
+  return (
+    typeof candidate.version === "string" &&
+    !!candidate.version &&
+    !!candidate.platforms &&
+    typeof candidate.platforms === "object"
+  );
+}
+
+async function fetchLatestJsonAsset(
+  assets: ReleaseAsset[],
+): Promise<UpdaterManifest | null> {
+  const latestJsonAsset = findAsset(assets, "latest.json");
+  if (!latestJsonAsset) return null;
+
+  const response = await fetch(latestJsonAsset.browser_download_url, {
+    headers: githubHeaders(),
+  });
+
+  if (!response.ok) {
+    throw new Error(`latest.json download failed with ${response.status}`);
+  }
+
+  const manifest = (await response.json()) as unknown;
+  if (!isUpdaterManifest(manifest)) {
+    throw new Error("latest.json is missing required updater fields");
+  }
+
+  return manifest;
+}
+
 async function buildManifest(
   release: GitHubRelease,
 ): Promise<UpdaterManifest | null> {
+  const latestJsonManifest = await fetchLatestJsonAsset(release.assets);
+  if (latestJsonManifest) {
+    return latestJsonManifest;
+  }
+
   const platforms: Record<string, PlatformUpdate> = {};
 
   for (const { target, matchers } of PLATFORM_DEFINITIONS) {
@@ -212,6 +263,23 @@ async function buildManifest(
     pub_date: release.published_at ?? undefined,
     platforms,
   };
+}
+
+async function findManifestForChannel(
+  releases: GitHubRelease[],
+  channel: Channel,
+): Promise<{ manifest: UpdaterManifest; release: GitHubRelease } | null> {
+  for (const release of releases) {
+    if (release.draft) continue;
+    if (channel === "stable" && release.prerelease) continue;
+
+    const manifest = await buildManifest(release);
+    if (manifest) {
+      return { manifest, release };
+    }
+  }
+
+  return null;
 }
 
 function jsonError(
@@ -260,17 +328,17 @@ app.get("/:channel/latest.json", async (c) => {
       );
     }
 
-    const manifest = await buildManifest(release);
-    if (!manifest) {
+    const resolved = await findManifestForChannel(releases, channel);
+    if (!resolved) {
       return jsonError(
         c,
         404,
         "updater_artifacts_missing",
-        `Release ${release.tag_name} does not contain Tauri updater artifacts and matching .sig files.`,
+        `No published ${channel} release contains a valid Tauri updater manifest.`,
       );
     }
 
-    return c.json(manifest);
+    return c.json(resolved.manifest);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "unknown_error";
     return jsonError(c, 502, "upstream_error", detail);
